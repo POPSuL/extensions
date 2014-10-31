@@ -1,0 +1,165 @@
+allprojects {
+    apply plugin: 'java'
+    apply plugin: 'maven'
+    apply plugin: 'idea'
+    apply plugin: 'signing'
+
+    [compileJava, compileTestJava, javadoc]*.options*.encoding = 'UTF-8'
+
+    sourceCompatibility = 1.6
+    targetCompatibility = 1.6
+
+    project.group = 'org.develnext'
+    project.version = '0.5'
+    project.ext.isSnapshot = System.getProperty("release", "0") == "0";
+
+    if (project.ext.isSnapshot) {
+        version += '-SNAPSHOT'
+    }
+
+    project.ext.jphpDependency ='org.develnext:jphp-core:0.5' + (project.ext.isSnapshot ? '-SNAPSHOT' : '');
+
+    repositories {
+        maven { url 'https://oss.sonatype.org/content/repositories/snapshots/' }
+        mavenCentral()
+    }
+
+    sourceSets {
+        main.java.srcDirs = ['src/main/java']
+        main.resources.srcDirs = ['src/main/resources']
+
+        test.java.srcDirs = ["src/main/tests"]
+        test.resources.srcDirs = ["src/main/tests"]
+    }
+
+    dependencies {
+        compile project.ext.jphpDependency
+    }
+
+    if (project.ext.isSnapshot) {
+        configurations.all {
+            // check for updates every build
+            resolutionStrategy.cacheChangingModulesFor 10, 'seconds'
+        }
+    }
+
+    // dist
+    ext.distPath = "$rootProject.buildDir/dist-" + project.version
+
+    task collectJars(type: Copy, overwrite: true){
+        into "$project.ext.distPath/libs"
+        from configurations.runtime
+        exclude "jphp-*"
+    }
+
+    task copyRuntimeLibs(type: Copy, dependsOn: "jar", overwrite: true) {
+        into "$project.ext.distPath/libs"
+        from "$libsDir/" + jar.archiveName
+        rename jar.archiveName, "$jar.baseName." + jar.extension
+    }
+
+    task buildPortableDef(dependsOn: [copyRuntimeLibs, collectJars], overwrite: true) {
+        copy {
+            from "sdk/"
+            into "$project.ext.distPath/sdk"
+        }
+    }
+}
+
+
+// extensions
+configure(subprojects.findAll { it.name.endsWith("-ext") }) {
+    task extensionJar(type: Jar, dependsOn: "classes") {
+        extensionJar.archiveName = project.name + ".jar"
+
+        from {
+            configurations.compile.findAll {
+                !it.toString().contains("jphp-") && !it.toString().contains("asm-")
+            }.collect {
+                it.isDirectory() ? it : zipTree(it)
+            }
+        }
+        from sourceSets.main.output.classesDir
+    }
+}
+
+// for deploy
+configure([
+        project(':jphp-jsoup-ext')
+]) {
+    if (!project.ext.isSnapshot) {
+        task sourcesJar(type: Jar, dependsOn: 'classes') {
+            classifier = 'sources'
+            from sourceSets.main.allSource
+        }
+
+        task javadocJar(type: Jar, dependsOn: javadoc) {
+            classifier = 'javadoc'
+            from javadoc.destinationDir
+        }
+
+        jar.dependsOn += [sourcesJar, javadocJar]
+
+        artifacts {
+            archives sourcesJar
+            archives javadocJar
+        }
+
+        signing {
+            sign configurations.archives
+        }
+    }
+
+    task deploy << {
+        rootProject.ext {
+            username = rootProject.hasProperty('username') ? rootProject.username : System.console().readLine("\nusername: ")
+            password = rootProject.hasProperty('password') ? rootProject.password : System.console().readPassword("password: ").toString()
+        }
+
+        uploadArchives {
+            repositories {
+                mavenDeployer {
+                    beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
+
+                    repository(url: 'https://oss.sonatype.org/service/local/staging/deploy/maven2') {
+                        authentication(userName: rootProject.username, password: rootProject.password);
+                    }
+                    snapshotRepository(url: 'https://oss.sonatype.org/content/repositories/snapshots') {
+                        authentication(userName: rootProject.username, password: rootProject.password);
+                    }
+
+                    pom.project {
+                        name 'JPHP Extensions'
+                        description 'Additional extensions for JPHP'
+                        packaging 'jar'
+                        url 'http://github.com/jphp-compiler/extensions'
+
+                        scm {
+                            connection 'scm:git:git@github.com:jphp-compiler/extensions.git'
+                            developerConnection 'scm:git:git@github.com:jphp-compiler/extensions.git'
+                            url 'git@github.com:jphp-compiler/extensions.git'
+                        }
+
+                        licenses {
+                            license {
+                                name 'The Apache License, Version 2.0'
+                                url 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                            }
+                        }
+
+                        developers {
+                            developer {
+                                id 'dim-s'
+                                name 'Dmitriy Zayceff'
+                                email 'd.zayceff@gmail.com'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        uploadArchives.execute();
+    }
+
+    deploy.dependsOn += jar
+}
